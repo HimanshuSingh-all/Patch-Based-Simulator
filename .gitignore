@@ -1,0 +1,5 @@
+*pycache*
+*.pyc
+*._.git
+*_compartments.py
+*._.*
