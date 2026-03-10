@@ -58,7 +58,7 @@ class CompartmentPatchArray:
         """
         Get a copy of the state.
         """
-        return np.copy()
+        return np.copy(self.state)
 
 
 class CompartmentalModel:
@@ -74,8 +74,8 @@ def SEIRV_patch_stepper(
     alpha:float,
     gamma:float,
     network_matrix:NDArray,
-    waning_weiner_shape:float,
-    waning_weiner_scale:float
+    waning_weibull_shape:float,
+    waning_weibull_scale:float
     )->NDArray:
     """
     Patch stepper for SEIRV model
@@ -106,21 +106,21 @@ def SEIRV_patch_stepper(
         network_matrix: NDArray
             The interaction matrix between two patches.
 
-        waning_weiner_shape: float
+        waning_weibull_shape: float
             The shape parameter from which the waning number of recovered individuals is drawn.
 
-        waning_weiner_scale: float
+        waning_weibull_scale: float
             The scale parameter from which the waning number of recovered individuals is drawn.
 
     """
     assert network_matrix.shape[0] == network_matrix.shape[1]
     assert network_matrix.ndim == 2
-    assert betas_patches == compartment_patch_array.num_patches
+    assert betas_patches.shape[0] == compartment_patch_array.num_patches
     assert compartment_patch_array.num_compartments == 5
     assert vaccination_14_days_prior.shape == (compartment_patch_array.num_patches, )
     
-    randomwaning = waning_weiner_scale*np.random.weibull(
-        a = waning_weiner_shape,
+    randomwaning = waning_weibull_scale*np.random.weibull(
+        a = waning_weibull_shape,
         size=compartment_patch_array.num_patches
         )
     
@@ -131,8 +131,12 @@ def SEIRV_patch_stepper(
        randomwaning
     )
 
-    new_num_exposed_patches_per_day = pass
+    stateref = compartment_patch_array.state
+    new_num_exposed_patches_per_day = network_matrix @ (stateref[:,2]/stateref.sum(axis=1))
+    assert new_num_exposed_patches_per_day.ndim == 1
+    assert new_num_exposed_patches_per_day.shape == betas_patches.shape
 
+    new_num_exposed_patches_per_day = betas_patches * stateref[:, 0] * new_num_exposed_patches_per_day
     new_num_infected_patches_per_day = alpha*compartment_patch_array.state[:,1]
 
     num_recovered_patch = gamma*compartment_patch_array.state[:,2]
@@ -144,8 +148,4 @@ def SEIRV_patch_stepper(
         num_recovered_patch-waned_recovery_numbers,
         vaccine_efficacy*vaccination_14_days_prior
     ]
-    return np.array(change)
-
-
-
-
+    return np.array(change).T

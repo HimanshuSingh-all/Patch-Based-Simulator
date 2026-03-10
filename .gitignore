@@ -3,3 +3,5 @@
 *._.git
 *_compartments.py
 *._.*
+._*.py
+._*.ipynb
