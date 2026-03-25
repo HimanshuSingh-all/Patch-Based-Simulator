@@ -133,7 +133,8 @@ def SEIRV_patch_stepper(
 
     stateref = compartment_patch_array.state
     cc = stateref[:,2]
-    new_num_exposed_patches_per_day = network_matrix @ (stateref[:,2]/stateref.sum(axis=1))
+    patch_population = stateref.sum(axis=1)
+    new_num_exposed_patches_per_day = network_matrix @ (stateref[:,2]/patch_population)
     assert new_num_exposed_patches_per_day.ndim == 1
     assert new_num_exposed_patches_per_day.shape == betas_patches.shape
 
