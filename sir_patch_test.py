@@ -94,4 +94,4 @@ plt.plot(times[m//2::m], states_sir_model[m//2::m, 0], marker = 'v', linestyle =
 plt.plot(times[m//2::m], states_sir_model[m//2::m, 1], marker = 'v', linestyle = '-.', markerfacecolor='none', label = 'I')
 # plt.plot(states_sir_model[:, 2], marker = 'v', linestyle = '-.', markerfacecolor='none', label = 'R')
 plt.legend()
-plt.savefig('test.png')
+plt.savefig('test.png', dpi = 300)

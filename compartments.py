@@ -151,3 +151,73 @@ def SEIRV_patch_stepper(
         vaccine_efficacy*vaccination_14_days_prior
     ]
     return np.array(change).T
+
+
+def SEIR_patch_get_trajectory(
+    STEPS: int,
+    compartment_patch_array:CompartmentPatchArray,
+    vaccination_14_days_prior_list: NDArray,
+    vaccine_efficacy:float,
+    betas_patches: NDArray|list,
+    alpha:float,
+    gamma:float,
+    network_matrix:NDArray,
+    waning_weibull_shape:float,
+    waning_weibull_scale:float,
+    checks: bool =False
+    )->list[NDArray]:
+    """
+    Patch stepper for SEIRV model.
+
+    Parameters
+    ----------
+        compartment_patch_array: CompartmentPatchArray
+            The object of :CompartmentPatchArray: with 5 colmns. This will be used to initialise the 
+            trajectory.
+        
+        vaccination_14_days_prior_list: list[NDArray]
+            The array containing the number of vaccinations done in the 
+            respective patches 14 days prior. Should be of the shape
+            `(compartment_patch_array.num_patches, )`
+
+        vaccine_efficacy: float
+            The efficacy of the vaccine.
+
+        betas_patches: NDArray
+            The one dimensional array representing betas for
+            the respective patches.
+        
+        alpha: float
+            The rate of moving from exposed to infected
+        
+        gamma: float
+            The rate of recovery parameter
+
+        network_matrix: NDArray
+            The interaction matrix between two patches.
+
+        waning_weibull_shape: float
+            The shape parameter from which the waning number of recovered individuals is drawn.
+
+        waning_weibull_scale: float
+            The scale parameter from which the waning number of recovered individuals is drawn.
+
+    """
+    states = [compartment_patch_array.get_copy_of_the_state()]
+    for i in range(STEPS):
+        # print(i);
+        step = SEIRV_patch_stepper(
+            compartment_patch_array=compartment_patch_array,
+            alpha= alpha,
+            gamma= gamma,
+            vaccination_14_days_prior= vaccination_14_days_prior_list[i],
+            vaccine_efficacy= vaccine_efficacy,
+            betas_patches = betas_patches,
+            network_matrix= network_matrix,
+            waning_weibull_scale= waning_weibull_scale,
+            waning_weibull_shape= waning_weibull_shape
+        )
+        assert np.all(np.isclose(np.sum(states[-1], axis= 1), np.sum(states[0], axis = 1)))
+        compartment_patch_array.update_state(compartment_patch_array.state + step)
+        states.append(compartment_patch_array.get_copy_of_the_state())
+    return states
