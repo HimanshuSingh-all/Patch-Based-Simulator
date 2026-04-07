@@ -3,7 +3,8 @@ import numpy as np
 from numpy.typing import NDArray
 from typing import Any, Callable, Protocol
 from dataclasses import dataclass
-
+from typing import TypedDict
+from scipy import optimize
 @dataclass
 class CompartmentPatchArray:
     """
@@ -222,8 +223,30 @@ def SEIR_patch_get_trajectory(
         states.append(compartment_patch_array.get_copy_of_the_state())
     return states
 
+
+
+class RunSimulationParams(TypedDict):
+    """
+    Typed dict to pack all the simulation parameters into a 
+    structured dictionary
+    """    
+    unit_mobility_matrix: NDArray
+    age_contact_matrix: NDArray
+    initial_state_units_ages: NDArray
+    betas_units: NDArray
+    steps: int
+    alpha: float
+    gamma: float
+    vaccination_daily_rate_patches: NDArray
+    vaccine_efficacy: float
+    waning_weibull_shape: float
+    waning_weibull_scale: float
+    vaccine_effect_time:int
+
+
+
 # I asked gemini to create a wrapper function based on the 
-# functions I had already written
+# functions I had already written and then i made some changes
 def run_packaged_simulation(
     unit_mobility_matrix,
     age_contact_matrix,
@@ -232,10 +255,11 @@ def run_packaged_simulation(
     steps=200,
     alpha=1/5.8,
     gamma=1/5.0,
-    vaccination_daily_rate_units=None,
+    vaccination_daily_rate_patches=None,
     vaccine_efficacy=0.8,
     waning_weibull_shape=3.7,
-    waning_weibull_scale=120
+    waning_weibull_scale=120,
+    vaccine_effect_time = 14
 ):
     """
     Executes a multi-patch, age-stratified SEIRV epidemiological simulation 
@@ -259,7 +283,8 @@ def run_packaged_simulation(
     gamma : float, default=1/5.0
         Recovery rate (inverse of average infectious period).
     vaccination_daily_rate_units : np.ndarray, optional
-        Daily number of vaccine doses administered per unit. Distributed 
+        Daily number of vaccine doses administered per unit, should backdated n days where n is the 
+        number of days for vaccine to take effect, default is 14. Distributed 
         equally across age groups.
     vaccine_efficacy : float, default=0.8
         Probability that a vaccine prevents infection.
@@ -267,7 +292,8 @@ def run_packaged_simulation(
         Shape parameter for the Weibull distribution of immunity waning.
     waning_weibull_scale : float, default=120
         Scale parameter (characteristic life) for immunity waning in days.
-
+    vaccine_effect_time : int, default=120
+        The number of days for the vaccine to take effect on average.
     Returns:
     --------
     trajectory : np.ndarray
@@ -283,20 +309,17 @@ def run_packaged_simulation(
     
     # 2. Flatten Initial States and Betas
     initial_state = initial_state_units_ages.reshape((NUM_PATCHES, 5))
-    betas_patches = get_patch_basebetas_from_unit_betas(betas_units, NUM_AGES)
+    betas_patches = get_patch_based_betas_from_unit_betas(betas_units, NUM_AGES)
     
     # 3. Handle Daily Vaccination (Distribute equally across age groups)
-    if vaccination_daily_rate_units is None:
-        vaccination_daily_rate_units = np.zeros(NUM_UNITS)
-    
-    # Divide unit vaccines among age groups 
-    vaccine_per_patch = np.repeat(vaccination_daily_rate_units / NUM_AGES, NUM_AGES)
-   
-    # Create the schedule and apply the 14-day lag automatically
-    vaccination_schedule = np.tile(vaccine_per_patch, (steps, 1))
-    vaccination_14_days_prior_list = np.zeros_like(vaccination_schedule)
-    if steps > 14:
-        vaccination_14_days_prior_list[14:] = vaccination_schedule[:-14]
+    if vaccination_daily_rate_patches is None:
+        vaccine_per_patch = np.zeros(NUM_PATCHES)
+        vaccination_schedule = np.tile(vaccine_per_patch, (steps, 1))
+        vaccination_n_days_prior_list = np.zeros_like(vaccination_schedule)
+        if steps > vaccine_effect_time:
+            vaccination_n_days_prior_list[vaccine_effect_time:] = vaccination_schedule[:-vaccine_effect_time]
+    else:
+        vaccination_n_days_prior_list = vaccination_daily_rate_patches
 
     # 4. Initialize and Run
     patch_array = CompartmentPatchArray(
@@ -309,7 +332,7 @@ def run_packaged_simulation(
     trajectory = SEIR_patch_get_trajectory(
         STEPS=steps,
         compartment_patch_array=patch_array,
-        vaccination_14_days_prior_list=vaccination_14_days_prior_list,
+        vaccination_14_days_prior_list=vaccination_n_days_prior_list,
         vaccine_efficacy=vaccine_efficacy,
         betas_patches=betas_patches,
         alpha=alpha,
@@ -346,5 +369,64 @@ def get_patch_based_betas_from_unit_betas(betas_units: np.ndarray, num_age_group
     return np.repeat(betas_units, num_age_groups)
 
 
-def calibirate_betas():
-    pass
+
+def loss_function(
+        joined_unit_cir_with_unit_contacts:NDArray,
+        params_dict:RunSimulationParams,
+        steps:int,
+        infections_reported_timeseries:NDArray
+):
+    
+    assert joined_unit_cir_with_unit_contacts.ndim ==1
+    assert infections_reported_timeseries.ndim == 1
+    assert infections_reported_timeseries.shape[0] == steps+1
+
+    NUM_UNITS = params_dict['unit_mobility_matrix'].shape[0]
+    assert joined_unit_cir_with_unit_contacts.shape[0] == 2*NUM_UNITS
+
+    params_dict['betas_units'] = joined_unit_cir_with_unit_contacts[NUM_UNITS:2*NUM_UNITS]
+    trajectory:NDArray  = run_packaged_simulation(**params_dict)
+    trajectory = trajectory[:,:,:,2].sum(axis =-2)
+    assert trajectory.shape == (steps+1, NUM_UNITS, 1) or trajectory.shape == (steps+1, NUM_UNITS,)
+    trajectory = trajectory.squeeze()
+    assert trajectory.ndim == 2
+    predicted_cases_timeseries = trajectory * joined_unit_cir_with_unit_contacts[:NUM_UNITS]
+    total_predicted_cases = predicted_cases_timeseries.sum(axis = 1)
+    assert total_predicted_cases.shape == (steps+1, )
+    filt = np.ones(7)
+    predicted_cases_filtered = np.convolve( 
+        filt,
+        total_predicted_cases,
+        mode = 'valid'
+    )
+    reported_cases_filtered = np.convolve( 
+        filt,
+        infections_reported_timeseries,
+        mode = 'valid'
+    )
+    result = np.sum((np.log(predicted_cases_filtered)- np.log(reported_cases_filtered))**2)
+    return result
+
+
+def calibirate_betas_seirv_patch(
+        simulation_params_init:RunSimulationParams,
+        cir_units_init:NDArray,
+        betas_units_init:NDArray,
+        cases_reported_total:NDArray
+        ):
+    """
+    Calibirate the unit based beta rates. Return unitwise CIR and contact rates
+    """
+    join_cir_betas = np.concatenate((cir_units_init, betas_units_init), axis= None)
+    steps = simulation_params_init['steps']
+    args_tuple = ( simulation_params_init, steps, cases_reported_total)
+    results = optimize.minimize(
+        fun=loss_function,
+        x0 = join_cir_betas,
+        args = args_tuple
+        )
+    NUM_UNITS = simulation_params_init['unit_mobility_matrix'].shape[0]
+    joined_result = results.x
+    cir_unitwise = joined_result[:NUM_UNITS]
+    betas_unitwise = joined_result[NUM_UNITS:2*NUM_UNITS]
+    return cir_unitwise, betas_unitwise
