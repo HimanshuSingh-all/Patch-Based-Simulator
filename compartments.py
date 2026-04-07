@@ -205,6 +205,7 @@ def SEIR_patch_get_trajectory(
 
     """
     states = [compartment_patch_array.get_copy_of_the_state()]
+    # print(np.sum(states[0], axis = 1))
     for i in range(STEPS):
         # print(i);
         step = SEIRV_patch_stepper(
@@ -218,9 +219,16 @@ def SEIR_patch_get_trajectory(
             waning_weibull_scale= waning_weibull_scale,
             waning_weibull_shape= waning_weibull_shape
         )
-        assert np.all(np.isclose(np.sum(states[-1], axis= 1), np.sum(states[0], axis = 1)))
+        # print(step.shape, compartment_patch_array.state.shape)
+        # change = step[:, 0]+ compartment_patch_array.state[:,0]
+        # print(change[change<0])
+        # assert np.any(change>0)
+        # print(np.sum(states[-1], axis= 1), np.sum(states[0], axis = 1) )
+        # 
+        # assert np.all(np.isclose(np.sum(states[-1], axis= 1), np.sum(states[0], axis = 1)))
         compartment_patch_array.update_state(compartment_patch_array.state + step)
         states.append(compartment_patch_array.get_copy_of_the_state())
+    assert np.all(np.isclose(np.sum(states[-1], axis= 1), np.sum(states[0], axis = 1)))
     return states
 
 
@@ -385,8 +393,10 @@ def loss_function(
     assert joined_unit_cir_with_unit_contacts.shape[0] == 2*NUM_UNITS
 
     params_dict['betas_units'] = joined_unit_cir_with_unit_contacts[NUM_UNITS:2*NUM_UNITS]
+    print('f: ', joined_unit_cir_with_unit_contacts[NUM_UNITS:NUM_UNITS+3])
     trajectory:NDArray  = run_packaged_simulation(**params_dict)
-    trajectory = trajectory[:,:,:,2].sum(axis =-2)
+    trajectory = trajectory[:,:,:,2].sum(axis =2)
+    # print(trajectory.shape)
     assert trajectory.shape == (steps+1, NUM_UNITS, 1) or trajectory.shape == (steps+1, NUM_UNITS,)
     trajectory = trajectory.squeeze()
     assert trajectory.ndim == 2
@@ -394,18 +404,64 @@ def loss_function(
     total_predicted_cases = predicted_cases_timeseries.sum(axis = 1)
     assert total_predicted_cases.shape == (steps+1, )
     filt = np.ones(7)
-    predicted_cases_filtered = np.convolve( 
+
+    predicted_cases_filtered = np.convolve(
         filt,
         total_predicted_cases,
         mode = 'valid'
     )
-    reported_cases_filtered = np.convolve( 
+    reported_cases_filtered = np.convolve(
         filt,
         infections_reported_timeseries,
         mode = 'valid'
     )
+    assert np.any(predicted_cases_filtered!=0)
     result = np.sum((np.log(predicted_cases_filtered)- np.log(reported_cases_filtered))**2)
+    # print(f'loss: {result}')
     return result
+
+
+def calibirate_betas_cir_seirv_patch(
+        simulation_params_init:RunSimulationParams,
+        cir_units_init:NDArray,
+        betas_units_init:NDArray,
+        cases_reported_total:NDArray
+        ):
+    """
+    Calibirate the unit based beta rates. Return unitwise CIR and contact rates
+    """
+
+
+    NUM_AGES = simulation_params_init['age_contact_matrix'].shape[0]
+    NUM_UNITS = simulation_params_init['unit_mobility_matrix'].shape[0]
+    network_matrix = combine_mobility_agerates(simulation_params_init['unit_mobility_matrix'], simulation_params_init['age_contact_matrix'])
+    BETAS_UPPER_BOUND = network_matrix.sum(axis=1)
+    BETAS_UPPER_BOUND = 1/np.squeeze(np.max(BETAS_UPPER_BOUND.reshape(BETAS_UPPER_BOUND.shape[0]//NUM_AGES, NUM_AGES), axis = 1))
+    assert BETAS_UPPER_BOUND.shape == (NUM_UNITS, )
+    cons = []
+    for idx in range(NUM_UNITS):
+        cons.append({'type': 'ineq', 'fun': lambda x, idx=idx: 1-x[idx]})
+        cons.append({'type': 'ineq', 'fun': lambda x, idx=idx: x[idx]-0})
+    for idx in range(NUM_UNITS, 2*NUM_UNITS):
+        cons.append({'type': 'ineq', 'fun': lambda x, idx=idx: BETAS_UPPER_BOUND[idx-NUM_UNITS]-x[idx]})
+        cons.append({'type': 'ineq', 'fun': lambda x, idx=idx: x[idx]-0})
+
+    print(cons)
+    constraints = cons
+    join_cir_betas = np.concatenate((cir_units_init, betas_units_init), axis= None)
+    steps = simulation_params_init['steps']
+    args_tuple = ( simulation_params_init, steps, cases_reported_total)
+    results = optimize.minimize(
+        fun=loss_function,
+        x0 = join_cir_betas,
+        args = args_tuple,
+        constraints=constraints,
+        method='trust-constr'
+        )
+    joined_result = results.x
+    cir_unitwise = joined_result[:NUM_UNITS]
+    betas_unitwise = joined_result[NUM_UNITS:2*NUM_UNITS]
+    return cir_unitwise, betas_unitwise, results, BETAS_UPPER_BOUND
 
 
 def calibirate_betas_seirv_patch(
@@ -417,16 +473,35 @@ def calibirate_betas_seirv_patch(
     """
     Calibirate the unit based beta rates. Return unitwise CIR and contact rates
     """
+
+
+    NUM_AGES = simulation_params_init['age_contact_matrix'].shape[0]
+    NUM_UNITS = simulation_params_init['unit_mobility_matrix'].shape[0]
+    network_matrix = combine_mobility_agerates(simulation_params_init['unit_mobility_matrix'], simulation_params_init['age_contact_matrix'])
+    BETAS_UPPER_BOUND = network_matrix.sum(axis=1)
+    BETAS_UPPER_BOUND = 1/np.squeeze(np.max(BETAS_UPPER_BOUND.reshape(BETAS_UPPER_BOUND.shape[0]//NUM_AGES, NUM_AGES), axis = 1))
+    assert BETAS_UPPER_BOUND.shape == (NUM_UNITS, )
+    cons = []
+    for idx in range(NUM_UNITS):
+        cons.append({'type': 'ineq', 'fun': lambda x, idx=idx: 1-x[idx]})
+        cons.append({'type': 'ineq', 'fun': lambda x, idx=idx: x[idx]-0})
+    for idx in range(NUM_UNITS, 2*NUM_UNITS):
+        cons.append({'type': 'ineq', 'fun': lambda x, idx=idx: BETAS_UPPER_BOUND[idx-NUM_UNITS]-x[idx]})
+        cons.append({'type': 'ineq', 'fun': lambda x, idx=idx: x[idx]-0})
+
+    print(cons)
+    constraints = cons
     join_cir_betas = np.concatenate((cir_units_init, betas_units_init), axis= None)
     steps = simulation_params_init['steps']
     args_tuple = ( simulation_params_init, steps, cases_reported_total)
     results = optimize.minimize(
         fun=loss_function,
         x0 = join_cir_betas,
-        args = args_tuple
+        args = args_tuple,
+        constraints=constraints,
+        method='trust-constr'
         )
-    NUM_UNITS = simulation_params_init['unit_mobility_matrix'].shape[0]
     joined_result = results.x
     cir_unitwise = joined_result[:NUM_UNITS]
     betas_unitwise = joined_result[NUM_UNITS:2*NUM_UNITS]
-    return cir_unitwise, betas_unitwise
+    return cir_unitwise, betas_unitwise, results, BETAS_UPPER_BOUND
