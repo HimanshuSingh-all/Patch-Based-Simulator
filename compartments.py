@@ -5,6 +5,7 @@ from typing import Any, Callable, Protocol
 from dataclasses import dataclass
 from typing import TypedDict
 from scipy import optimize
+from scipy.optimize import Bounds
 @dataclass
 class CompartmentPatchArray:
     """
@@ -464,6 +465,55 @@ def calibirate_betas_cir_seirv_patch(
     return cir_unitwise, betas_unitwise, results, BETAS_UPPER_BOUND
 
 
+
+
+
+def loss_function_betasonly(
+        betas_unit_contacts:NDArray,
+        params_dict:RunSimulationParams,
+        steps:int,
+        infections_reported_timeseries:NDArray,
+        cases_to_infections_per_unit:NDArray
+):
+    """
+    Only calibirate for the contact rates of the units
+    """
+    assert betas_unit_contacts.ndim ==1
+    assert infections_reported_timeseries.ndim == 1
+    assert infections_reported_timeseries.shape[0] == steps+1
+
+    NUM_UNITS = params_dict['unit_mobility_matrix'].shape[0]
+    assert betas_unit_contacts.shape[0] == NUM_UNITS
+
+    params_dict['betas_units'] = betas_unit_contacts
+    # print('f: ', betas_unit_contacts[:3])
+    trajectory:NDArray  = run_packaged_simulation(**params_dict)
+    trajectory = trajectory[:,:,:,2].sum(axis =2)
+    # print(trajectory.shape)
+    assert trajectory.shape == (steps+1, NUM_UNITS, 1) or trajectory.shape == (steps+1, NUM_UNITS,)
+    trajectory = trajectory.squeeze()
+    assert trajectory.ndim == 2
+    predicted_cases_timeseries = trajectory * cases_to_infections_per_unit
+    total_predicted_cases = predicted_cases_timeseries.sum(axis = 1)
+    assert total_predicted_cases.shape == (steps+1, )
+    filt = np.ones(7)
+
+    predicted_cases_filtered = np.convolve(
+        filt,
+        total_predicted_cases,
+        mode = 'valid'
+    )
+    reported_cases_filtered = np.convolve(
+        filt,
+        infections_reported_timeseries,
+        mode = 'valid'
+    )
+    assert np.any(predicted_cases_filtered!=0)
+    result = np.sum((np.log(predicted_cases_filtered)- np.log(reported_cases_filtered))**2)
+    # print(f'loss: {result}')
+    return result
+
+
 def calibirate_betas_seirv_patch(
         simulation_params_init:RunSimulationParams,
         cir_units_init:NDArray,
@@ -471,7 +521,7 @@ def calibirate_betas_seirv_patch(
         cases_reported_total:NDArray
         ):
     """
-    Calibirate the unit based beta rates. Return unitwise CIR and contact rates
+    Calibirate the unit based beta rates. Return the uniteise contact rates
     """
 
 
@@ -481,27 +531,28 @@ def calibirate_betas_seirv_patch(
     BETAS_UPPER_BOUND = network_matrix.sum(axis=1)
     BETAS_UPPER_BOUND = 1/np.squeeze(np.max(BETAS_UPPER_BOUND.reshape(BETAS_UPPER_BOUND.shape[0]//NUM_AGES, NUM_AGES), axis = 1))
     assert BETAS_UPPER_BOUND.shape == (NUM_UNITS, )
-    cons = []
-    for idx in range(NUM_UNITS):
-        cons.append({'type': 'ineq', 'fun': lambda x, idx=idx: 1-x[idx]})
-        cons.append({'type': 'ineq', 'fun': lambda x, idx=idx: x[idx]-0})
-    for idx in range(NUM_UNITS, 2*NUM_UNITS):
-        cons.append({'type': 'ineq', 'fun': lambda x, idx=idx: BETAS_UPPER_BOUND[idx-NUM_UNITS]-x[idx]})
-        cons.append({'type': 'ineq', 'fun': lambda x, idx=idx: x[idx]-0})
 
-    print(cons)
-    constraints = cons
-    join_cir_betas = np.concatenate((cir_units_init, betas_units_init), axis= None)
+    # cons = []
+    # for idx in range(NUM_UNITS):
+    #     cons.append({'type': 'ineq', 'fun': lambda x, idx=idx: BETAS_UPPER_BOUND[idx-NUM_UNITS]-x[idx]})
+    #     cons.append({'type': 'ineq', 'fun': lambda x, idx=idx: x[idx]-0})
+
+    # print(cons)
+    lowerbounds = np.zeros_like(BETAS_UPPER_BOUND)
+    upperbounds = BETAS_UPPER_BOUND
+    BOUNDS = Bounds(lb=lowerbounds, ub = upperbounds)
+    # constraints = cons
     steps = simulation_params_init['steps']
-    args_tuple = ( simulation_params_init, steps, cases_reported_total)
+    args_tuple = ( simulation_params_init, steps, cases_reported_total, cir_units_init)
     results = optimize.minimize(
-        fun=loss_function,
-        x0 = join_cir_betas,
+        fun=loss_function_betasonly,
+        x0 = betas_units_init,
         args = args_tuple,
-        constraints=constraints,
+        # constraints=constraints,
+        bounds=BOUNDS,
         method='trust-constr'
+        # options={'keep_feasible': True}
         )
     joined_result = results.x
-    cir_unitwise = joined_result[:NUM_UNITS]
-    betas_unitwise = joined_result[NUM_UNITS:2*NUM_UNITS]
-    return cir_unitwise, betas_unitwise, results, BETAS_UPPER_BOUND
+    betas_unitwise = joined_result
+    return betas_unitwise, results, BETAS_UPPER_BOUND
